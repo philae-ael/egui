@@ -31,7 +31,7 @@ pub(crate) use profiling_scopes::*;
 
 use winit::{
     dpi::{PhysicalPosition, PhysicalSize},
-    event_loop::EventLoopWindowTarget,
+    event_loop::ActiveEventLoop,
     window::{CursorGrabMode, Window, WindowButtons, WindowLevel},
 };
 
@@ -157,21 +157,6 @@ impl State {
         slf
     }
 
-    #[cfg(feature = "accesskit")]
-    pub fn init_accesskit<T: From<accesskit_winit::ActionRequestEvent> + Send>(
-        &mut self,
-        window: &Window,
-        event_loop_proxy: winit::event_loop::EventLoopProxy<T>,
-        initial_tree_update_factory: impl 'static + FnOnce() -> accesskit::TreeUpdate + Send,
-    ) {
-        crate::profile_function!();
-        self.accesskit = Some(accesskit_winit::Adapter::new(
-            window,
-            initial_tree_update_factory,
-            event_loop_proxy,
-        ));
-    }
-
     /// Call this once a graphics context has been created to update the maximum texture dimensions
     /// that egui will use.
     pub fn set_max_texture_side(&mut self, max_texture_side: usize) {
@@ -261,11 +246,6 @@ impl State {
         event: &winit::event::WindowEvent,
     ) -> EventResponse {
         crate::profile_function!(short_window_event_description(event));
-
-        #[cfg(feature = "accesskit")]
-        if let Some(accesskit) = &self.accesskit {
-            accesskit.process_event(window, event);
-        }
 
         use winit::event::WindowEvent;
         match event {
@@ -470,25 +450,10 @@ impl State {
                 consumed: false,
             },
 
-            // Things we completely ignore:
-            WindowEvent::ActivationTokenDone { .. }
-            | WindowEvent::AxisMotion { .. }
-            | WindowEvent::SmartMagnify { .. }
-            | WindowEvent::TouchpadRotate { .. } => EventResponse {
-                repaint: false,
+            _ => EventResponse {
                 consumed: false,
+                repaint: false,
             },
-
-            WindowEvent::TouchpadMagnify { delta, .. } => {
-                // Positive delta values indicate magnification (zooming in).
-                // Negative delta values indicate shrinking (zooming out).
-                let zoom_factor = (*delta as f32).exp();
-                self.egui_input.events.push(egui::Event::Zoom(zoom_factor));
-                EventResponse {
-                    repaint: true,
-                    consumed: self.egui_ctx.wants_pointer_input(),
-                }
-            }
         }
     }
 
@@ -882,7 +847,7 @@ impl State {
 
             if let Some(winit_cursor_icon) = translate_cursor(cursor_icon) {
                 window.set_cursor_visible(true);
-                window.set_cursor_icon(winit_cursor_icon);
+                window.set_cursor(winit_cursor_icon);
             } else {
                 window.set_cursor_visible(false);
             }
@@ -1526,26 +1491,26 @@ fn process_viewport_command(
 /// Possible causes of error include denied permission, incompatible system, and lack of memory.
 pub fn create_window<T>(
     egui_ctx: &egui::Context,
-    event_loop: &EventLoopWindowTarget<T>,
+    event_loop: &ActiveEventLoop,
     viewport_builder: &ViewportBuilder,
 ) -> Result<Window, winit::error::OsError> {
     crate::profile_function!();
 
-    let window_builder =
+    let window_attributes =
         create_winit_window_builder(egui_ctx, event_loop, viewport_builder.clone());
     let window = {
         crate::profile_scope!("WindowBuilder::build");
-        window_builder.build(event_loop)?
+        event_loop.create_window(window_attributes)?
     };
     apply_viewport_builder_to_window(egui_ctx, &window, viewport_builder);
     Ok(window)
 }
 
-pub fn create_winit_window_builder<T>(
+pub fn create_winit_window_builder(
     egui_ctx: &egui::Context,
-    event_loop: &EventLoopWindowTarget<T>,
+    event_loop: &ActiveEventLoop,
     viewport_builder: ViewportBuilder,
-) -> winit::window::WindowBuilder {
+) -> winit::window::WindowAttributes {
     crate::profile_function!();
 
     // We set sizes and positions in egui:s own ui points, which depends on the egui
@@ -1604,7 +1569,7 @@ pub fn create_winit_window_builder<T>(
         clamp_size_to_monitor_size: _, // Handled in `viewport_builder` in `epi_integration.rs`
     } = viewport_builder;
 
-    let mut window_builder = winit::window::WindowBuilder::new()
+    let mut window_builder = winit::window::WindowAttributes::default()
         .with_title(title.unwrap_or_else(|| "egui window".to_owned()))
         .with_transparent(transparent.unwrap_or(false))
         .with_decorations(decorations.unwrap_or(true))
@@ -1669,37 +1634,37 @@ pub fn create_winit_window_builder<T>(
 
     #[cfg(all(feature = "wayland", target_os = "linux"))]
     if let Some(app_id) = _app_id {
-        use winit::platform::wayland::WindowBuilderExtWayland as _;
+        use winit::platform::wayland::WindowAttributesExtWayland as _;
         window_builder = window_builder.with_name(app_id, "");
     }
 
     #[cfg(all(feature = "x11", target_os = "linux"))]
     {
         if let Some(window_type) = _window_type {
-            use winit::platform::x11::WindowBuilderExtX11 as _;
-            use winit::platform::x11::XWindowType;
+            use winit::platform::x11::WindowAttributesExtX11 as _;
+            use winit::platform::x11::WindowType;
             window_builder = window_builder.with_x11_window_type(vec![match window_type {
-                egui::X11WindowType::Normal => XWindowType::Normal,
-                egui::X11WindowType::Utility => XWindowType::Utility,
-                egui::X11WindowType::Dock => XWindowType::Dock,
-                egui::X11WindowType::Desktop => XWindowType::Desktop,
-                egui::X11WindowType::Toolbar => XWindowType::Toolbar,
-                egui::X11WindowType::Menu => XWindowType::Menu,
-                egui::X11WindowType::Splash => XWindowType::Splash,
-                egui::X11WindowType::Dialog => XWindowType::Dialog,
-                egui::X11WindowType::DropdownMenu => XWindowType::DropdownMenu,
-                egui::X11WindowType::PopupMenu => XWindowType::PopupMenu,
-                egui::X11WindowType::Tooltip => XWindowType::Tooltip,
-                egui::X11WindowType::Notification => XWindowType::Notification,
-                egui::X11WindowType::Combo => XWindowType::Combo,
-                egui::X11WindowType::Dnd => XWindowType::Dnd,
+                egui::X11WindowType::Normal => WindowType::Normal,
+                egui::X11WindowType::Utility => WindowType::Utility,
+                egui::X11WindowType::Dock => WindowType::Dock,
+                egui::X11WindowType::Desktop => WindowType::Desktop,
+                egui::X11WindowType::Toolbar => WindowType::Toolbar,
+                egui::X11WindowType::Menu => WindowType::Menu,
+                egui::X11WindowType::Splash => WindowType::Splash,
+                egui::X11WindowType::Dialog => WindowType::Dialog,
+                egui::X11WindowType::DropdownMenu => WindowType::DropdownMenu,
+                egui::X11WindowType::PopupMenu => WindowType::PopupMenu,
+                egui::X11WindowType::Tooltip => WindowType::Tooltip,
+                egui::X11WindowType::Notification => WindowType::Notification,
+                egui::X11WindowType::Combo => WindowType::Combo,
+                egui::X11WindowType::Dnd => WindowType::Dnd,
             }]);
         }
     }
 
     #[cfg(target_os = "windows")]
     {
-        use winit::platform::windows::WindowBuilderExtWindows as _;
+        use winit::platform::windows::WindowAttributesExtWindows as _;
         if let Some(enable) = _drag_and_drop {
             window_builder = window_builder.with_drag_and_drop(enable);
         }
@@ -1710,7 +1675,7 @@ pub fn create_winit_window_builder<T>(
 
     #[cfg(target_os = "macos")]
     {
-        use winit::platform::macos::WindowBuilderExtMacOS as _;
+        use winit::platform::macos::WindowAttributesExtMacOS as _;
         window_builder = window_builder
             .with_title_hidden(!_title_shown.unwrap_or(true))
             .with_titlebar_buttons_hidden(!_titlebar_buttons_shown.unwrap_or(true))
@@ -1842,16 +1807,14 @@ pub fn short_window_event_description(event: &winit::event::WindowEvent) -> &'st
         WindowEvent::CursorLeft { .. } => "WindowEvent::CursorLeft",
         WindowEvent::MouseWheel { .. } => "WindowEvent::MouseWheel",
         WindowEvent::MouseInput { .. } => "WindowEvent::MouseInput",
-        WindowEvent::TouchpadMagnify { .. } => "WindowEvent::TouchpadMagnify",
         WindowEvent::RedrawRequested { .. } => "WindowEvent::RedrawRequested",
-        WindowEvent::SmartMagnify { .. } => "WindowEvent::SmartMagnify",
-        WindowEvent::TouchpadRotate { .. } => "WindowEvent::TouchpadRotate",
         WindowEvent::TouchpadPressure { .. } => "WindowEvent::TouchpadPressure",
         WindowEvent::AxisMotion { .. } => "WindowEvent::AxisMotion",
         WindowEvent::Touch { .. } => "WindowEvent::Touch",
         WindowEvent::ScaleFactorChanged { .. } => "WindowEvent::ScaleFactorChanged",
         WindowEvent::ThemeChanged { .. } => "WindowEvent::ThemeChanged",
         WindowEvent::Occluded { .. } => "WindowEvent::Occluded",
+        _ => "WindowEvent::Unknown",
     }
 }
 
